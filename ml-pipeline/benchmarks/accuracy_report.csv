@@ -1,0 +1,5 @@
+Condition,Accuracy_pct,TAR_FAR_0.001,TAR_FAR_0.01
+standard,99.3,0.984,0.99
+harsh_sun,98.69,0.9518,0.9839
+low_light,99.1,0.91,0.986
+shadow,99.1,0.974,0.988
