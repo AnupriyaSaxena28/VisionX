@@ -14,8 +14,10 @@ class MainApplication : Application(), ReactApplication {
       context = applicationContext,
       packageList =
         PackageList(this).packages.apply {
-          // Packages that cannot be autolinked yet can be added manually here, for example:
-          // add(MyReactNativePackage())
+          // ── M3 Integration: Register FaceAuthModule native bridge ──────────
+          // NativeModule.ts (M3→M4 contract) depends on this registration.
+          // JS accesses it as: NativeModules.FaceAuthModule
+          add(FaceAuthPackage())
         },
     )
   }
@@ -23,5 +25,10 @@ class MainApplication : Application(), ReactApplication {
   override fun onCreate() {
     super.onCreate()
     loadReactNative(this)
+
+    // ── M3 Integration: Schedule background attendance sync ────────────────
+    // WorkManager picks this up immediately and re-enqueues every 15 minutes
+    // when network is available. Uses ACK-before-purge pattern (SyncService.kt).
+    SyncService.schedulePeriodic(this)
   }
 }

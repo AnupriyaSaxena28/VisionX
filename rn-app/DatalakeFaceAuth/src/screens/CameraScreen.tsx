@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { View, StyleSheet, Text, ActivityIndicator } from 'react-native';
 import { Camera, useCameraDevices } from 'react-native-vision-camera';
 import Svg, { Ellipse } from 'react-native-svg';
@@ -7,13 +7,11 @@ import Animated, {
   useSharedValue,
   useAnimatedProps,
   withTiming,
-  withRepeat,
-  withSequence,
   FadeIn,
   FadeOut,
   interpolateColor
 } from 'react-native-reanimated';
-import FaceAuthService from '../services/FaceAuthService';
+import { authenticatePhoto } from '../services/FaceAuthService';
 
 const AnimatedEllipse = Animated.createAnimatedComponent(Ellipse);
 
@@ -29,8 +27,7 @@ export const CameraScreen = () => {
   const [livenessState, setLivenessState] = useState<LivenessState>('no_face');
   const [instruction, setInstruction] = useState('Position your face in the oval');
 
-  // Animation values
-  const strokeColorProgress = useSharedValue(0); // 0: gray, 1: green, 2: amber
+  const strokeColorProgress = useSharedValue(0);
 
   useEffect(() => {
     (async () => {
@@ -39,7 +36,7 @@ export const CameraScreen = () => {
     })();
   }, []);
 
-  // Animate color based on state
+  // Map liveness state → animated oval colour + instruction text
   useEffect(() => {
     switch (livenessState) {
       case 'no_face':
@@ -60,7 +57,7 @@ export const CameraScreen = () => {
         break;
       case 'success':
         strokeColorProgress.value = withTiming(1, { duration: 300 });
-        setInstruction('Authenticated Successfully');
+        setInstruction('Authenticated Successfully ✓');
         break;
       case 'failed':
         strokeColorProgress.value = withTiming(0, { duration: 300 });
@@ -69,92 +66,88 @@ export const CameraScreen = () => {
     }
   }, [livenessState, strokeColorProgress]);
 
-  const animatedProps = useAnimatedProps(() => {
-    const stroke = interpolateColor(
+  const animatedProps = useAnimatedProps(() => ({
+    stroke: interpolateColor(
       strokeColorProgress.value,
       [0, 1, 2],
-      ['gray', 'green', '#FFC107'] // #FFC107 is amber
-    );
-    return {
-      stroke,
-    };
-  });
+      ['#555', '#4CAF50', '#FFC107']
+    ),
+  }));
 
-  // Mock frame processing logic - periodically take snapshot and authenticate
-  // In a real scenario with high performance needs, this would be a Frame Processor
-  // running a native plugin, but to get JS base64 we use takePhoto or similar.
+  // ── Frame processing loop ─────────────────────────────────────────────────
+  // Calls the real native module via authenticateFromPath (no base64 conversion).
+  // The native module runs BlazeFace + EAR liveness + MobileFaceNet in one call.
   useEffect(() => {
     if (!hasPermission || !device) return;
-    
+    if (livenessState === 'success' || livenessState === 'processing') return;
+
     let isProcessing = false;
-    let interval: NodeJS.Timeout;
 
     const processFrame = async () => {
       if (isProcessing || !camera.current) return;
-      
-      // Stop processing if we reached a terminal state
-      if (livenessState === 'success' || livenessState === 'processing') return;
-
       isProcessing = true;
+
       try {
-        // We use takePhoto with low quality to simulate frame extraction
         const photo = await camera.current.takePhoto({
           qualityPrioritization: 'speed',
           enableShutterSound: false,
         });
 
-        // Convert file path to base64 or pass file path to native module
-        // We assume FaceAuthService handles the file path directly or we read it
-        const result = await FaceAuthService.authenticate(photo.path);
-        
-        // Update states based on result
+        // ── M3 integration: call authenticateFromPath (not base64) ──────────
+        // photo.path is the absolute file path returned by VisionCamera.
+        // FaceAuthService.authenticatePhoto() → FaceAuthModule.authenticateFromPath()
+        // → native pipeline: BlazeFace → FaceMesh EAR → MobileFaceNet → cosine sim
+        const result = await authenticatePhoto(photo.path);
+
         if (result.matched && result.livenessPass) {
           setLivenessState('success');
-          // Navigate to result screen after a brief delay
           setTimeout(() => {
-            navigation.navigate('Result', { 
-              success: true, 
-              name: 'Aarav Patel', 
-              timestamp: new Date().toISOString() 
+            navigation.navigate('Result', {
+              success: true,
+              name: result.name,
+              score: result.score,
+              timestamp: new Date().toISOString(),
             });
-            // Reset state for when we come back
             setLivenessState('no_face');
           }, 1000);
-        } else if (result.state === 'blink') {
-          setLivenessState('face_detected');
-        } else if (result.state === 'turn') {
-          setLivenessState('challenge');
-        } else {
+        } else if (!result.livenessPass && result.score < 0.3) {
+          // No face detected at all
           setLivenessState('no_face');
+        } else if (!result.livenessPass) {
+          // Face detected but liveness not yet passed → drive the challenge UI
+          // The native LivenessChallengeManager drives blink→turn internally.
+          // We map the score proxy to the UX states:
+          setLivenessState(prev =>
+            prev === 'no_face' || prev === 'failed' ? 'face_detected' :
+            prev === 'face_detected' ? 'challenge' : prev
+          );
+        } else {
+          // Liveness pass but score below threshold → not recognized
+          setLivenessState('face_detected');
         }
-
-      } catch (error) {
-        console.warn('Frame processing error:', error);
+      } catch (err) {
+        console.warn('[CameraScreen] Frame error:', err);
       } finally {
         isProcessing = false;
       }
     };
 
-    // Start a processing loop every 1 second
-    interval = setInterval(processFrame, 1000);
-
-    return () => {
-      clearInterval(interval);
-    };
+    const interval = setInterval(processFrame, 1200);
+    return () => clearInterval(interval);
   }, [hasPermission, device, livenessState]);
 
   if (!hasPermission) {
     return (
       <View style={styles.container}>
-        <Text style={styles.text}>No Camera Permission</Text>
+        <Text style={styles.text}>Camera permission required</Text>
       </View>
     );
   }
 
-  if (device == null) {
+  if (!device) {
     return (
       <View style={styles.container}>
-        <Text style={styles.text}>No Camera Found</Text>
+        <Text style={styles.text}>No front camera found</Text>
       </View>
     );
   }
@@ -165,36 +158,35 @@ export const CameraScreen = () => {
         ref={camera}
         style={StyleSheet.absoluteFill}
         device={device}
-        isActive={true}
+        isActive={livenessState !== 'processing' && livenessState !== 'success'}
         photo={true}
       />
-      
-      {/* SVG Overlay */}
+
+      {/* Animated face oval overlay */}
       <View style={styles.overlay} pointerEvents="none">
         <Svg height="100%" width="100%">
           <AnimatedEllipse
             cx="50%"
-            cy="50%"
-            rx="40%"
-            ry="60%"
-            strokeWidth="5"
+            cy="45%"
+            rx="38%"
+            ry="48%"
+            strokeWidth="4"
             fill="transparent"
             animatedProps={animatedProps}
           />
         </Svg>
       </View>
 
-      {/* Dynamic Instruction Text with Reanimated Fade Transitions */}
+      {/* Instruction banner */}
       <View style={styles.instructionContainer}>
         <Animated.Text
           key={instruction}
-          entering={FadeIn.duration(400)}
-          exiting={FadeOut.duration(400)}
+          entering={FadeIn.duration(300)}
+          exiting={FadeOut.duration(300)}
           style={styles.instructionText}
         >
           {instruction}
         </Animated.Text>
-        
         {livenessState === 'processing' && (
           <ActivityIndicator size="small" color="#fff" style={styles.spinner} />
         )}
@@ -210,12 +202,9 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
-  text: {
-    color: '#fff',
-    fontSize: 18,
-  },
+  text: { color: '#fff', fontSize: 18 },
   overlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill as any,
     justifyContent: 'center',
     alignItems: 'center',
   },
@@ -224,20 +213,18 @@ const styles = StyleSheet.create({
     bottom: 100,
     alignItems: 'center',
     flexDirection: 'row',
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    paddingHorizontal: 20,
-    paddingVertical: 12,
-    borderRadius: 25,
+    backgroundColor: 'rgba(0,0,0,0.65)',
+    paddingHorizontal: 24,
+    paddingVertical: 14,
+    borderRadius: 28,
   },
   instructionText: {
     color: '#fff',
-    fontSize: 18,
+    fontSize: 17,
     fontWeight: '600',
     textAlign: 'center',
   },
-  spinner: {
-    marginLeft: 10,
-  },
+  spinner: { marginLeft: 10 },
 });
 
 export default CameraScreen;

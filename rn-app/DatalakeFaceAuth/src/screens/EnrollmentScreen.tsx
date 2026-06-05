@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { View, Text, TextInput, StyleSheet, TouchableOpacity, ActivityIndicator, Alert } from 'react-native';
 import { Camera, useCameraDevices } from 'react-native-vision-camera';
 import { useNavigation } from '@react-navigation/native';
-import FaceAuthService from '../services/FaceAuthService';
+import { enrollFace } from '../services/FaceAuthService';
 
 export const EnrollmentScreen = () => {
   const devices = useCameraDevices();
@@ -40,7 +40,6 @@ export const EnrollmentScreen = () => {
     try {
       for (let i = 0; i < 5; i++) {
         setCaptureCount(i + 1);
-        
         if (i === 1) setInstruction('Tilt head slightly up...');
         if (i === 2) setInstruction('Tilt head slightly down...');
         if (i === 3) setInstruction('Turn head slightly left...');
@@ -48,34 +47,33 @@ export const EnrollmentScreen = () => {
 
         const photo = await camera.current.takePhoto({
           qualityPrioritization: 'speed',
-          enableShutterSound: true, // provide auditory feedback
+          enableShutterSound: true,
         });
-        
         imagePaths.push(photo.path);
-        
-        // Wait 800ms to allow user to change angle
-        if (i < 4) {
-          await new Promise((resolve) => setTimeout(resolve, 800));
-        }
+        if (i < 4) await new Promise(r => setTimeout(() => r(undefined), 800));
       }
 
       setInstruction('Processing enrollment...');
       setIsCapturing(false);
       setIsEnrolling(true);
 
-      const result = await FaceAuthService.enrollFace(name.trim(), imagePaths);
-      
+      // ── M3 integration: call real native enrollFace ─────────────────────
+      // Returns { success: boolean, id: string } — id is the UUID from SQLite.
+      // timestamp is generated locally since the native contract doesn't include it.
+      const result = await enrollFace(name.trim(), imagePaths);
+      const enrolledAt = new Date().toISOString();
+
       if (result.success) {
         navigation.navigate('EnrollmentConfirmation', {
           name: name.trim(),
-          timestamp: result.timestamp,
+          timestamp: enrolledAt,   // local timestamp; id = result.id stored in DB
         });
       } else {
         Alert.alert('Enrollment Failed', 'Could not enroll user. Please try again.');
         setInstruction('Enter your name and press Capture');
       }
     } catch (error) {
-      console.error(error);
+      console.error('[EnrollmentScreen]', error);
       Alert.alert('Error', 'An error occurred during enrollment.');
       setInstruction('Enter your name and press Capture');
     } finally {
@@ -83,6 +81,7 @@ export const EnrollmentScreen = () => {
       setIsEnrolling(false);
     }
   };
+
 
   if (!hasPermission) {
     return (
@@ -164,7 +163,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   uiOverlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     justifyContent: 'space-between',
     padding: 20,
     paddingTop: 60,

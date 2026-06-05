@@ -78,12 +78,37 @@ android {
     compileSdk rootProject.ext.compileSdkVersion
 
     namespace "com.datalakefaceauth"
+
+    buildFeatures {
+        buildConfig = true
+    }
+
     defaultConfig {
         applicationId "com.datalakefaceauth"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1
         versionName "1.0"
+
+        // ── BuildConfig constants ─────────────────────────────────────────────
+        // DB_SECRET: combined with the device's Android ID to derive the
+        //            SQLCipher encryption key. Change before production release.
+        buildConfigField "String", "DB_SECRET", "\"visionx_db_secret_hackathon_2026\""
+
+        // AWS_SYNC_ENDPOINT: POST /attendance (see native-module/api-contract/API_SPEC.md)
+        buildConfigField "String", "AWS_SYNC_ENDPOINT", "\"https://api.visionx.example.com/v1/attendance\""
+
+        // AWS_API_KEY: device-scoped API key provisioned during enrollment
+        buildConfigField "String", "AWS_API_KEY", "\"vx_dev_placeholder_key\""
+
+        // Keep TFLite model files from being compressed by aapt
+        aaptOptions {
+            noCompress "tflite", "lite"
+        }
+
+        ndk {
+            abiFilters "arm64-v8a", "x86_64"
+        }
     }
     signingConfigs {
         debug {
@@ -108,12 +133,30 @@ android {
 }
 
 dependencies {
-    // The version of react-native is set by the React Native Gradle Plugin
+    // ── React Native ──────────────────────────────────────────────────────────
     implementation("com.facebook.react:react-android")
-
     if (hermesEnabled.toBoolean()) {
         implementation("com.facebook.react:hermes-android")
     } else {
         implementation jscFlavor
     }
+
+    // ── SQLCipher (AES-256 encrypted SQLite) ──────────────────────────────────
+    // Used by DatabaseManager for encrypted on-device storage
+    implementation "net.zetetic:android-database-sqlcipher:4.5.4"
+    implementation "androidx.sqlite:sqlite:2.4.0"
+
+    // ── TensorFlow Lite (BlazeFace + MobileFaceNet + FaceMesh) ───────────────
+    implementation "org.tensorflow:tensorflow-lite:2.14.0"
+    implementation "org.tensorflow:tensorflow-lite-support:0.4.4"
+    implementation "org.tensorflow:tensorflow-lite-metadata:0.4.4"
+    // GPU delegate (optional — enables GPU acceleration on supported devices)
+    implementation "org.tensorflow:tensorflow-lite-gpu:2.14.0"
+
+    // ── WorkManager (background sync scheduler) ───────────────────────────────
+    implementation "androidx.work:work-runtime-ktx:2.9.0"
+
+    // ── Coroutines ────────────────────────────────────────────────────────────
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3"
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.3"
 }

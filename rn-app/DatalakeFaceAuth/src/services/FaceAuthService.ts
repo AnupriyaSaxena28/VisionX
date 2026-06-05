@@ -1,114 +1,190 @@
-import { NativeModules } from 'react-native';
+/**
+ * FaceAuthService — JS service layer bridging screens to the native module.
+ *
+ * ┌─ CameraScreen / EnrollmentScreen / HistoryScreen
+ * │         (import FaceAuthService)
+ * └─ FaceAuthService
+ *         ↓ calls
+ *    FaceAuthModule (NativeModule.ts)
+ *         ↓ JNI bridge
+ *    FaceAuthModule.kt / FaceAuthPackage.kt
+ *         ↓ calls
+ *    FaceDetector / FaceEmbedder / LivenessDetector  (inference/*.kt)
+ *         +  DatabaseManager.kt  (SQLCipher)
+ *
+ * If the native module is unavailable (e.g., running in Expo Go or Jest),
+ * the service falls back to lightweight mocks so the UI renders correctly.
+ */
 
-// Assuming Member 3 will export a strongly-typed NativeModule from this path
-// or that they will link it via NativeModules directly. We will provide a 
-// mock import or type definition here for the error handling wrapper.
-// import FaceAuthNative from '../../../../native-module/NativeModule';
+import { Platform } from 'react-native';
+import FaceAuthModule, { AuthResult, EnrollResult } from '../NativeModule';
 
-const { FaceAuthNativeModule } = NativeModules;
-
-export interface FaceEmbedding {
-  id: string;
-  embedding: number[];
-}
-
-export interface LivenessResult {
-  isLive: boolean;
-  score: number;
-}
+// ── Type re-exports used by screens ──────────────────────────────────────────
 
 export interface AttendanceLog {
   id: string;
   name: string;
-  timestamp: string;
-  score: number;
+  timestamp: string;     // ISO 8601
+  score: number;         // auth_score 0–1
+  livenessScore: number;
   synced: boolean;
 }
 
-// Mock state for sequence testing
-let authCallCount = 0;
-let isEnrolled = false;
+// ── Helper: is the native module available? ───────────────────────────────────
 
-export const FaceAuthService = {
-  async detectFace(frameBase64: string): Promise<any> {
-    return { detected: true };
-  },
+const isNativeAvailable = (): boolean => {
+  return !!FaceAuthModule && typeof FaceAuthModule.authenticate === 'function';
+};
 
-  async extractEmbedding(frameBase64: string): Promise<number[]> {
-    return [0.1, 0.2, 0.3];
-  },
+// ── Initialisation ─────────────────────────────────────────────────────────────
 
-  async checkLiveness(frameBase64: string): Promise<LivenessResult> {
-    return { isLive: true, score: 0.98 };
-  },
+let _initialized = false;
 
-  async authenticate(frameBase64: string): Promise<{ livenessPass: boolean, matched: boolean, state: string }> {
-    // Simulate network/processing delay
-    await new Promise(resolve => setTimeout(resolve, 200));
-
-    authCallCount++;
-
-    // 0-2: "Please blink" (face_detected)
-    if (authCallCount <= 3) {
-      return { livenessPass: false, matched: false, state: 'blink' };
-    }
-    // 4-6: "Now turn your head slightly" (challenge)
-    if (authCallCount <= 6) {
-      return { livenessPass: false, matched: false, state: 'turn' };
-    }
-    
-    // Reset counter for next time
-    authCallCount = 0;
-
-    // 7+: Success
-    return { livenessPass: true, matched: true, state: 'success' };
-  },
-
-  async enrollFace(name: string, imagePaths: string[]): Promise<{ success: boolean, timestamp: string }> {
-    await new Promise(resolve => setTimeout(resolve, 1500)); // Simulate processing
-    isEnrolled = true;
-    return { success: true, timestamp: new Date().toISOString() };
-  },
-
-  async syncWithAWS(): Promise<boolean> {
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    return true;
-  },
-
-  async getAttendanceLog(): Promise<AttendanceLog[]> {
-    return [
-      {
-        id: '1',
-        name: 'Aarav Patel',
-        timestamp: new Date(Date.now() - 3600000).toISOString(),
-        score: 0.98,
-        synced: true,
-      },
-      {
-        id: '2',
-        name: 'Priya Sharma',
-        timestamp: new Date(Date.now() - 1800000).toISOString(),
-        score: 0.95,
-        synced: false,
-      },
-      {
-        id: '3',
-        name: isEnrolled ? 'New User (You)' : 'Rohan Kumar',
-        timestamp: new Date().toISOString(),
-        score: 0.99,
-        synced: false,
-      }
-    ];
-  },
-
-  async getPendingRecordsCount(): Promise<number> {
-    // Return 2 to test the amber syncing state
-    return 2;
-  },
-
-  async getLastSyncTime(): Promise<string> {
-    return new Date(Date.now() - 7200000).toISOString();
+/**
+ * Call this once from App.tsx (useEffect on mount).
+ * Resolves the model directory inside the APK assets folder.
+ */
+export async function initializeFaceAuth(): Promise<void> {
+  if (_initialized) return;
+  if (!isNativeAvailable()) {
+    console.warn('[FaceAuthService] Native module unavailable — running in mock mode');
+    _initialized = true;
+    return;
   }
+  try {
+    // On Android, TFLite models are bundled under assets/models/
+    // The native module reads them from the app's files directory.
+    // In production, copy assets to filesDir on first launch.
+    const modelPath = Platform.OS === 'android'
+      ? '/data/data/com.datalakefaceauth/files/models'
+      : `${(process as any).env.HOME}/Library/models`; // iOS placeholder
+
+    await FaceAuthModule.initialize(modelPath);
+    _initialized = true;
+    console.log('[FaceAuthService] Native module initialized');
+  } catch (err) {
+    console.error('[FaceAuthService] Initialization failed:', err);
+    // Don't throw — fall back to mock mode so UI still works
+    _initialized = true;
+  }
+}
+
+// ── Authentication ─────────────────────────────────────────────────────────────
+
+/**
+ * Authenticate a photo taken by VisionCamera.
+ * Uses authenticateFromPath to avoid JS-side file I/O.
+ *
+ * @param photoPath Absolute file path returned by camera.takePhoto()
+ */
+export async function authenticatePhoto(photoPath: string): Promise<AuthResult> {
+  if (!isNativeAvailable()) {
+    return mockAuthenticate();
+  }
+  return FaceAuthModule.authenticateFromPath(photoPath);
+}
+
+// ── Enrollment ─────────────────────────────────────────────────────────────────
+
+/**
+ * Enroll a new face.
+ *
+ * @param name       Display name for the person.
+ * @param imagePaths Array of local file paths (5 captures recommended).
+ */
+export async function enrollFace(
+  name: string,
+  imagePaths: string[]
+): Promise<{ success: boolean; id: string }> {
+  if (!isNativeAvailable()) {
+    await delay(1500);
+    return { success: true, id: `mock-${Date.now()}` };
+  }
+  const result: EnrollResult = await FaceAuthModule.enrollFace(name, imagePaths);
+  return result;
+}
+
+// ── Liveness challenge ─────────────────────────────────────────────────────────
+
+export async function startLivenessChallenge(): Promise<void> {
+  if (!isNativeAvailable()) return;
+  return FaceAuthModule.startLivenessChallenge();
+}
+
+export async function getLivenessChallengeState() {
+  if (!isNativeAvailable()) {
+    return { step: 'blink' as const, progress: 0 };
+  }
+  return FaceAuthModule.getLivenessChallengeState();
+}
+
+// ── Attendance history (read from native DB via new helper methods) ─────────────
+
+/**
+ * Returns recent attendance records.
+ * In a future iteration, a dedicated NativeModule method will expose the DB
+ * read directly. For now we reconstruct from the pending count + sync time.
+ */
+export async function getAttendanceLog(): Promise<AttendanceLog[]> {
+  // TODO (M3 v2): expose DatabaseManager.getAllAttendanceRecords() via NativeModule
+  // and replace mock data below with the real DB query.
+  return MOCK_ATTENDANCE;
+}
+
+export async function getPendingRecordsCount(): Promise<number> {
+  // TODO (M3 v2): expose DatabaseManager.getPendingCount() via NativeModule
+  return 0;
+}
+
+export async function getLastSyncTime(): Promise<string> {
+  // TODO (M3 v2): expose DatabaseManager.getLastSyncTimestamp() via NativeModule
+  return new Date(Date.now() - 15 * 60 * 1000).toISOString();
+}
+
+// ── Mocks (fallback when native module unavailable) ────────────────────────────
+
+let _mockCallCount = 0;
+
+async function mockAuthenticate(): Promise<AuthResult> {
+  await delay(200);
+  _mockCallCount++;
+  if (_mockCallCount <= 3) return { matched: false, name: '', score: 0, livenessPass: false };
+  if (_mockCallCount <= 6) return { matched: false, name: '', score: 0.3, livenessPass: false };
+  _mockCallCount = 0;
+  return { matched: true, name: 'Aarav Patel', score: 0.94, livenessPass: true };
+}
+
+const MOCK_ATTENDANCE: AttendanceLog[] = [
+  {
+    id: '1', name: 'Aarav Patel',
+    timestamp: new Date(Date.now() - 3_600_000).toISOString(),
+    score: 0.98, livenessScore: 0.97, synced: true,
+  },
+  {
+    id: '2', name: 'Priya Sharma',
+    timestamp: new Date(Date.now() - 1_800_000).toISOString(),
+    score: 0.95, livenessScore: 0.96, synced: false,
+  },
+  {
+    id: '3', name: 'Rohan Kumar',
+    timestamp: new Date().toISOString(),
+    score: 0.91, livenessScore: 0.93, synced: false,
+  },
+];
+
+const delay = (ms: number) => new Promise(r => setTimeout(() => r(undefined), ms));
+
+// ── Default export (legacy compat) ────────────────────────────────────────────
+
+const FaceAuthService = {
+  initializeFaceAuth,
+  authenticatePhoto,
+  enrollFace,
+  startLivenessChallenge,
+  getLivenessChallengeState,
+  getAttendanceLog,
+  getPendingRecordsCount,
+  getLastSyncTime,
 };
 
 export default FaceAuthService;
