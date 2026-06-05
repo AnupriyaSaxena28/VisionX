@@ -1,42 +1,78 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { View, StyleSheet, Text, ActivityIndicator } from 'react-native';
-import { Camera, useCameraDevices } from 'react-native-vision-camera';
+import {
+  Camera,
+  useCameraDevice,
+  useCameraPermission,
+  usePhotoOutput,
+} from 'react-native-vision-camera';
 import Svg, { Ellipse } from 'react-native-svg';
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation, useIsFocused } from '@react-navigation/native';
 import Animated, {
   useSharedValue,
   useAnimatedProps,
   withTiming,
   FadeIn,
   FadeOut,
-  interpolateColor
+  interpolateColor,
 } from 'react-native-reanimated';
-import { authenticatePhoto } from '../services/FaceAuthService';
+import { authenticatePhoto, getEnrolledCount } from '../services/FaceAuthService';
 
 const AnimatedEllipse = Animated.createAnimatedComponent(Ellipse);
 
-type LivenessState = 'no_face' | 'face_detected' | 'challenge' | 'processing' | 'success' | 'failed';
+type LivenessState =
+  | 'no_face'
+  | 'face_detected'
+  | 'challenge'
+  | 'processing'
+  | 'success'
+  | 'failed';
 
 export const CameraScreen = () => {
-  const devices = useCameraDevices();
-  const device = devices.find((d) => d.position === 'front');
-  const camera = useRef<Camera>(null);
+  const { hasPermission, requestPermission } = useCameraPermission();
+  const device = useCameraDevice('front');
   const navigation = useNavigation<any>();
+  const isFocused = useIsFocused();
+  const photoOutput = usePhotoOutput();
 
-  const [hasPermission, setHasPermission] = useState(false);
   const [livenessState, setLivenessState] = useState<LivenessState>('no_face');
-  const [instruction, setInstruction] = useState('Position your face in the oval');
+  const [instruction, setInstruction] = useState(
+    'Position your face in the oval',
+  );
+  const [lastScore, setLastScore] = useState<number>(0);
+  const [isCameraReady, setIsCameraReady] = useState(false);
+  const [enrolledCount, setEnrolledCount] = useState<number | null>(null);
+
+  // We use a ref for livenessState so the interval closure doesn't get stale
+  const stateRef = useRef<LivenessState>('no_face');
+
+  const syncState = (s: LivenessState) => {
+    stateRef.current = s;
+    setLivenessState(s);
+  };
 
   const strokeColorProgress = useSharedValue(0);
 
+  // ── Permission ────────────────────────────────────────────────────────────
   useEffect(() => {
-    (async () => {
-      const status = await Camera.requestCameraPermission();
-      setHasPermission(status === 'granted');
-    })();
+    if (!hasPermission) {
+      requestPermission();
+    }
+  }, [hasPermission, requestPermission]);
+
+  // ── Fetch enrolled count on mount ─────────────────────────────────────────
+  useEffect(() => {
+    getEnrolledCount()
+      .then(count => {
+        setEnrolledCount(count);
+        if (count === 0) {
+          console.warn('[CameraScreen] ⚠️ No enrolled faces! Verification will never match. Please enroll a face first.');
+        }
+      })
+      .catch(err => console.warn('[CameraScreen] Failed to get enrolled count:', err));
   }, []);
 
-  // Map liveness state → animated oval colour + instruction text
+  // ── Oval colour + instruction text ────────────────────────────────────────
   useEffect(() => {
     switch (livenessState) {
       case 'no_face':
@@ -45,11 +81,11 @@ export const CameraScreen = () => {
         break;
       case 'face_detected':
         strokeColorProgress.value = withTiming(1, { duration: 300 });
-        setInstruction('Please blink');
+        setInstruction('Please blink 👁️');
         break;
       case 'challenge':
         strokeColorProgress.value = withTiming(2, { duration: 300 });
-        setInstruction('Now turn your head slightly');
+        setInstruction('Now turn your head slightly ↩️');
         break;
       case 'processing':
         strokeColorProgress.value = withTiming(1, { duration: 300 });
@@ -61,7 +97,7 @@ export const CameraScreen = () => {
         break;
       case 'failed':
         strokeColorProgress.value = withTiming(0, { duration: 300 });
-        setInstruction('Authentication Failed. Try again.');
+        setInstruction('Not recognized. Move closer.');
         break;
     }
   }, [livenessState, strokeColorProgress]);
@@ -70,71 +106,115 @@ export const CameraScreen = () => {
     stroke: interpolateColor(
       strokeColorProgress.value,
       [0, 1, 2],
-      ['#555', '#4CAF50', '#FFC107']
+      ['#555', '#4CAF50', '#FFC107'],
     ),
   }));
 
   // ── Frame processing loop ─────────────────────────────────────────────────
-  // Calls the real native module via authenticateFromPath (no base64 conversion).
-  // The native module runs BlazeFace + EAR liveness + MobileFaceNet in one call.
   useEffect(() => {
-    if (!hasPermission || !device) return;
-    if (livenessState === 'success' || livenessState === 'processing') return;
+    if (!hasPermission || !device || !isCameraReady || !isFocused) return;
 
     let isProcessing = false;
+    let cancelled = false;
 
     const processFrame = async () => {
-      if (isProcessing || !camera.current) return;
+      if (isProcessing) return;
+      if (
+        stateRef.current === 'success' ||
+        stateRef.current === 'processing'
+      )
+        return;
+
       isProcessing = true;
 
       try {
-        const photo = await camera.current.takePhoto({
-          qualityPrioritization: 'speed',
-          enableShutterSound: false,
-        });
+        // Guard: don't capture if camera is no longer active
+        if (!isFocused || !isCameraReady) {
+          return;
+        }
 
-        // ── M3 integration: call authenticateFromPath (not base64) ──────────
-        // photo.path is the absolute file path returned by VisionCamera.
-        // FaceAuthService.authenticatePhoto() → FaceAuthModule.authenticateFromPath()
-        // → native pipeline: BlazeFace → FaceMesh EAR → MobileFaceNet → cosine sim
-        const result = await authenticatePhoto(photo.path);
+        // VisionCamera v5 API: capturePhoto() → save → dispose
+        const photo = await photoOutput.capturePhoto(
+          { enableShutterSound: false },
+          {},
+        );
+        if (cancelled) {
+          photo.dispose();
+          return;
+        }
+
+        let cleanPath: string;
+        try {
+          cleanPath = await photo.saveToTemporaryFileAsync();
+        } finally {
+          photo.dispose();
+        }
+        if (cancelled) return;
+
+        if (cleanPath.startsWith('file://')) {
+          cleanPath = cleanPath.replace('file://', '');
+        }
+
+        const result = await authenticatePhoto(cleanPath);
+        console.log('[CameraScreen] Frame auth result:', result);
+        if (cancelled) return;
+
+        setLastScore(result.score);
 
         if (result.matched && result.livenessPass) {
-          setLivenessState('success');
+          syncState('success');
           setTimeout(() => {
-            navigation.navigate('Result', {
-              success: true,
-              name: result.name,
-              score: result.score,
-              timestamp: new Date().toISOString(),
-            });
-            setLivenessState('no_face');
+            if (!cancelled) {
+              navigation.navigate('Result', {
+                success: true,
+                name: result.name,
+                score: result.score,
+                timestamp: new Date().toISOString(),
+              });
+              syncState('no_face');
+            }
           }, 1000);
         } else if (!result.livenessPass && result.score < 0.3) {
           // No face detected at all
-          setLivenessState('no_face');
+          syncState('no_face');
         } else if (!result.livenessPass) {
           // Face detected but liveness not yet passed → drive the challenge UI
-          // The native LivenessChallengeManager drives blink→turn internally.
-          // We map the score proxy to the UX states:
-          setLivenessState(prev =>
-            prev === 'no_face' || prev === 'failed' ? 'face_detected' :
-            prev === 'face_detected' ? 'challenge' : prev
+          syncState(
+            stateRef.current === 'no_face' || stateRef.current === 'failed'
+              ? 'face_detected'
+              : stateRef.current === 'face_detected'
+              ? 'challenge'
+              : stateRef.current,
           );
         } else {
-          // Liveness pass but score below threshold → not recognized
-          setLivenessState('face_detected');
+          // Liveness pass is TRUE, but score is below 0.6 (matched is false)
+          syncState('failed');
         }
       } catch (err) {
-        console.warn('[CameraScreen] Frame error:', err);
+        const errStr = String(err);
+        // Suppress expected camera lifecycle errors
+        if (
+          errStr.includes('Not bound to a valid Camera') ||
+          errStr.includes('Camera is closed') ||
+          errStr.includes('ImageCaptureException') ||
+          errStr.includes('session') ||
+          errStr.includes('closed')
+        ) {
+          console.log('[CameraScreen] Camera lifecycle event, skipping frame...');
+        } else {
+          console.warn('[CameraScreen] Frame error:', err);
+        }
       } finally {
         isProcessing = false;
       }
     };
 
     const interval = setInterval(processFrame, 1200);
-    return () => clearInterval(interval);
-  }, [hasPermission, device, livenessState]);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [hasPermission, device, isCameraReady, isFocused, photoOutput, navigation]);
 
   if (!hasPermission) {
     return (
@@ -152,14 +232,18 @@ export const CameraScreen = () => {
     );
   }
 
+  const cameraActive =
+    isFocused && livenessState !== 'processing' && livenessState !== 'success';
+
   return (
     <View style={styles.container}>
       <Camera
-        ref={camera}
         style={StyleSheet.absoluteFill}
         device={device}
-        isActive={livenessState !== 'processing' && livenessState !== 'success'}
-        photo={true}
+        isActive={cameraActive}
+        outputs={[photoOutput]}
+        onPreviewStarted={() => setIsCameraReady(true)}
+        onPreviewStopped={() => setIsCameraReady(false)}
       />
 
       {/* Animated face oval overlay */}
@@ -177,6 +261,16 @@ export const CameraScreen = () => {
         </Svg>
       </View>
 
+      {/* Debug score display */}
+      <View style={styles.debugContainer}>
+        <Text style={styles.debugText}>
+          Score: {lastScore.toFixed(3)}
+        </Text>
+        <Text style={[styles.debugText, enrolledCount === 0 && styles.debugWarning]}>
+          Enrolled: {enrolledCount !== null ? enrolledCount : '...'}
+        </Text>
+      </View>
+
       {/* Instruction banner */}
       <View style={styles.instructionContainer}>
         <Animated.Text
@@ -188,7 +282,11 @@ export const CameraScreen = () => {
           {instruction}
         </Animated.Text>
         {livenessState === 'processing' && (
-          <ActivityIndicator size="small" color="#fff" style={styles.spinner} />
+          <ActivityIndicator
+            size="small"
+            color="#fff"
+            style={styles.spinner}
+          />
         )}
       </View>
     </View>
@@ -204,9 +302,25 @@ const styles = StyleSheet.create({
   },
   text: { color: '#fff', fontSize: 18 },
   overlay: {
-    ...StyleSheet.absoluteFill as any,
+    ...(StyleSheet.absoluteFill as any),
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  debugContainer: {
+    position: 'absolute',
+    top: 50,
+    right: 20,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    padding: 8,
+    borderRadius: 8,
+  },
+  debugText: {
+    color: '#0f0',
+    fontSize: 14,
+    fontWeight: 'bold',
+  },
+  debugWarning: {
+    color: '#ff4444',
   },
   instructionContainer: {
     position: 'absolute',

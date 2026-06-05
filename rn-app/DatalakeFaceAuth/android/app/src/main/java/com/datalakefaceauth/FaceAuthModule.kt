@@ -21,6 +21,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
+import kotlin.math.sqrt
 
 /**
  * React Native bridge module for face authentication.
@@ -41,7 +42,8 @@ class FaceAuthModule(reactContext: ReactApplicationContext) :
         private const val TAG = "FaceAuthModule"
         private const val MODULE_NAME = "FaceAuthModule"
         // Threshold agreed in M1 SCHEMA.md: ≥ 0.6 → matched
-        private const val COSINE_SIMILARITY_THRESHOLD = 0.6
+        // Increased to 0.85 to minimize false positives in production.
+        private const val COSINE_SIMILARITY_THRESHOLD = 0.85f
     }
 
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
@@ -68,6 +70,35 @@ class FaceAuthModule(reactContext: ReactApplicationContext) :
         scope.launch {
             try {
                 val modelDir = File(modelPath)
+                if (!modelDir.exists()) {
+                    modelDir.mkdirs()
+                }
+
+                // Copy models from APK assets to the modelPath so they can be loaded
+                val assetManager = reactApplicationContext.assets
+                val modelsToCopy = arrayOf("blazeface.tflite", "mobilefacenet.tflite", "face_mesh_lite.tflite")
+                
+                for (modelName in modelsToCopy) {
+                    val targetFile = File(modelDir, modelName)
+                    if (!targetFile.exists() || targetFile.length() == 0L) {
+                        try {
+                            assetManager.open("models/$modelName").use { inputStream ->
+                                java.io.FileOutputStream(targetFile).use { outputStream ->
+                                    val buffer = ByteArray(1024 * 8)
+                                    var read: Int
+                                    while (inputStream.read(buffer).also { read = it } != -1) {
+                                        outputStream.write(buffer, 0, read)
+                                    }
+                                    outputStream.flush()
+                                }
+                            }
+                            android.util.Log.d(TAG, "Copied $modelName to $modelPath")
+                        } catch (e: Exception) {
+                            android.util.Log.e(TAG, "Failed to copy $modelName from assets", e)
+                        }
+                    }
+                }
+
                 if (!modelDir.exists() || !modelDir.isDirectory) {
                     promise.reject("INIT_ERROR", "Model directory does not exist: $modelPath")
                     return@launch
@@ -225,6 +256,26 @@ class FaceAuthModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    @ReactMethod
+    fun clearGallery(promise: Promise) {
+        try {
+            DatabaseManager.clearGallery()
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("DB_ERROR", "Failed to clear gallery: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun getEnrolledCount(promise: Promise) {
+        try {
+            val count = DatabaseManager.getEnrolledCount()
+            promise.resolve(count)
+        } catch (e: Exception) {
+            promise.reject("DB_ERROR", "Failed to get enrolled count: ${e.message}", e)
+        }
+    }
+
     // ──────────────────────────────────────────────────────────────
     //  Shared auth pipeline (used by both authenticate + authenticateFromPath)
     // ──────────────────────────────────────────────────────────────
@@ -233,6 +284,7 @@ class FaceAuthModule(reactContext: ReactApplicationContext) :
         val face = faceDetector!!.detectFace(bitmap)
         if (face == null) {
             bitmap.recycle()
+            android.util.Log.d(TAG, "No face detected in frame")
             val noFace: WritableMap = Arguments.createMap().apply {
                 putBoolean("matched", false)
                 putString("name", "")
@@ -247,20 +299,43 @@ class FaceAuthModule(reactContext: ReactApplicationContext) :
         val queryEmbedding = faceEmbedder!!.extractEmbedding(face)
         bitmap.recycle()
 
+        // Diagnostic: check if the query embedding is a zero-vector
+        val queryNorm = sqrt(queryEmbedding.sumOf { (it * it).toDouble() }).toFloat()
+        if (queryNorm < 1e-6f) {
+            android.util.Log.e(TAG, "⚠️ Query embedding is a ZERO vector! " +
+                "The FaceEmbedder model is NOT loaded. Matching will always fail.")
+        } else {
+            android.util.Log.d(TAG, "Query embedding norm=$queryNorm (healthy)")
+        }
+
         val gallery = withContext(Dispatchers.IO) {
             DatabaseManager.getEmbeddingsForMatching()
+        }
+        android.util.Log.i(TAG, "Gallery size: ${gallery.size}")
+
+        if (gallery.isEmpty()) {
+            android.util.Log.w(TAG, "⚠️ Gallery is EMPTY — no enrolled faces. " +
+                "Please enroll at least one face before attempting verification.")
         }
 
         var bestId    = ""
         var bestScore = -1.0
 
         for ((id, stored) in gallery) {
+            val storedNorm = sqrt(stored.sumOf { (it * it).toDouble() }).toFloat()
             val score = cosineSimilarity(queryEmbedding, stored)
+            android.util.Log.d(TAG, "Match candidate id=$id storedNorm=$storedNorm score=$score")
+            if (storedNorm < 1e-6f) {
+                android.util.Log.e(TAG, "⚠️ Stored embedding for id=$id is a ZERO vector! " +
+                    "This enrollment was done with the model NOT loaded. Re-enroll this face.")
+            }
             if (score > bestScore) {
                 bestScore = score
                 bestId    = id
             }
         }
+
+        android.util.Log.i(TAG, "Best match: id=$bestId score=$bestScore threshold=$COSINE_SIMILARITY_THRESHOLD")
 
         val bestName = if (bestId.isNotEmpty()) {
             withContext(Dispatchers.IO) { DatabaseManager.getNameById(bestId) } ?: ""
@@ -287,6 +362,7 @@ class FaceAuthModule(reactContext: ReactApplicationContext) :
             putDouble("score", bestScore)
             putBoolean("livenessPass", livenessPass)
         }
+        android.util.Log.i(TAG, "Auth result: matched=$matched name=${if (matched) bestName else ""} score=$bestScore livenessPass=$livenessPass")
         promise.resolve(result)
     }
 
@@ -349,7 +425,7 @@ class FaceAuthModule(reactContext: ReactApplicationContext) :
     //  Liveness Challenge State Machine (blink → turn → done)
     // ──────────────────────────────────────────────────────────────
 
-    inner class LivenessChallengeManager {
+    class LivenessChallengeManager {
 
         enum class Step(val value: String) {
             BLINK("blink"), TURN("turn"), DONE("done"), FAILED("failed")

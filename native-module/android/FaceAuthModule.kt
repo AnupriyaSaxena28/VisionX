@@ -373,7 +373,7 @@ class FaceAuthModule(reactContext: ReactApplicationContext) :
      * Each step tracks progress from 0 to 100. The challenge transitions
      * to 'failed' if any step times out.
      */
-    inner class LivenessChallengeManager {
+    class LivenessChallengeManager {
 
         enum class Step(val value: String) {
             BLINK("blink"),

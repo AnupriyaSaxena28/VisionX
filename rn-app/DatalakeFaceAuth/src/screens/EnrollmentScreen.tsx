@@ -1,35 +1,53 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { View, Text, TextInput, StyleSheet, TouchableOpacity, ActivityIndicator, Alert } from 'react-native';
-import { Camera, useCameraDevices } from 'react-native-vision-camera';
-import { useNavigation } from '@react-navigation/native';
+import React, { useState, useEffect } from 'react';
+import {
+  View,
+  Text,
+  TextInput,
+  StyleSheet,
+  TouchableOpacity,
+  ActivityIndicator,
+  Alert,
+} from 'react-native';
+import {
+  Camera,
+  useCameraDevice,
+  useCameraPermission,
+  usePhotoOutput,
+} from 'react-native-vision-camera';
+import { useNavigation, useIsFocused } from '@react-navigation/native';
 import { enrollFace } from '../services/FaceAuthService';
 
 export const EnrollmentScreen = () => {
-  const devices = useCameraDevices();
-  const device = devices.find((d) => d.position === 'front');
-  const camera = useRef<Camera>(null);
+  const { hasPermission, requestPermission } = useCameraPermission();
+  const device = useCameraDevice('front');
   const navigation = useNavigation<any>();
+  const isFocused = useIsFocused();
 
-  const [hasPermission, setHasPermission] = useState(false);
+  // ── VisionCamera v5: create a photo output ────────────────────────────────
+  const photoOutput = usePhotoOutput();
+
   const [name, setName] = useState('');
   const [isCapturing, setIsCapturing] = useState(false);
   const [isEnrolling, setIsEnrolling] = useState(false);
   const [captureCount, setCaptureCount] = useState(0);
-  const [instruction, setInstruction] = useState('Enter your name and press Capture');
+  const [instruction, setInstruction] = useState(
+    'Enter your name and press Capture',
+  );
 
   useEffect(() => {
-    (async () => {
-      const status = await Camera.requestCameraPermission();
-      setHasPermission(status === 'granted');
-    })();
-  }, []);
+    if (!hasPermission) {
+      requestPermission();
+    }
+  }, [hasPermission, requestPermission]);
 
   const handleCapture = async () => {
     if (!name.trim()) {
-      Alert.alert('Validation Error', 'Please enter a personnel name before capturing.');
+      Alert.alert(
+        'Validation Error',
+        'Please enter a personnel name before capturing.',
+      );
       return;
     }
-    if (!camera.current) return;
 
     setIsCapturing(true);
     setCaptureCount(0);
@@ -45,12 +63,22 @@ export const EnrollmentScreen = () => {
         if (i === 3) setInstruction('Turn head slightly left...');
         if (i === 4) setInstruction('Turn head slightly right...');
 
-        const photo = await camera.current.takePhoto({
-          qualityPrioritization: 'speed',
-          enableShutterSound: true,
-        });
-        imagePaths.push(photo.path);
-        if (i < 4) await new Promise(r => setTimeout(() => r(undefined), 800));
+        // VisionCamera v5 API: capturePhoto → save → dispose
+        const photo = await photoOutput.capturePhoto(
+          { enableShutterSound: true },
+          {},
+        );
+        let filePath: string;
+        try {
+          filePath = await photo.saveToTemporaryFileAsync();
+        } finally {
+          photo.dispose();
+        }
+        imagePaths.push(filePath);
+
+        if (i < 4) {
+          await new Promise(r => setTimeout(() => r(undefined), 800));
+        }
       }
 
       setInstruction('Processing enrollment...');
@@ -58,18 +86,19 @@ export const EnrollmentScreen = () => {
       setIsEnrolling(true);
 
       // ── M3 integration: call real native enrollFace ─────────────────────
-      // Returns { success: boolean, id: string } — id is the UUID from SQLite.
-      // timestamp is generated locally since the native contract doesn't include it.
       const result = await enrollFace(name.trim(), imagePaths);
       const enrolledAt = new Date().toISOString();
 
       if (result.success) {
         navigation.navigate('EnrollmentConfirmation', {
           name: name.trim(),
-          timestamp: enrolledAt,   // local timestamp; id = result.id stored in DB
+          timestamp: enrolledAt,
         });
       } else {
-        Alert.alert('Enrollment Failed', 'Could not enroll user. Please try again.');
+        Alert.alert(
+          'Enrollment Failed',
+          'Could not enroll user. Please try again.',
+        );
         setInstruction('Enter your name and press Capture');
       }
     } catch (error) {
@@ -81,7 +110,6 @@ export const EnrollmentScreen = () => {
       setIsEnrolling(false);
     }
   };
-
 
   if (!hasPermission) {
     return (
@@ -102,13 +130,12 @@ export const EnrollmentScreen = () => {
   return (
     <View style={styles.container}>
       <Camera
-        ref={camera}
         style={styles.cameraPreview}
         device={device}
-        isActive={!isEnrolling}
-        photo={true}
+        isActive={isFocused && !isEnrolling}
+        outputs={[photoOutput]}
       />
-      
+
       <View style={styles.uiOverlay}>
         <View style={styles.header}>
           <Text style={styles.headerTitle}>New Enrollment</Text>
@@ -117,7 +144,9 @@ export const EnrollmentScreen = () => {
         <View style={styles.instructionCard}>
           <Text style={styles.instructionText}>{instruction}</Text>
           {isCapturing && (
-            <Text style={styles.progressText}>Captured: {captureCount}/5</Text>
+            <Text style={styles.progressText}>
+              Captured: {captureCount}/5
+            </Text>
           )}
         </View>
 
@@ -132,7 +161,11 @@ export const EnrollmentScreen = () => {
           />
 
           <TouchableOpacity
-            style={[styles.captureButton, (isCapturing || isEnrolling || !name) && styles.captureButtonDisabled]}
+            style={[
+              styles.captureButton,
+              (isCapturing || isEnrolling || !name) &&
+                styles.captureButtonDisabled,
+            ]}
             onPress={handleCapture}
             disabled={isCapturing || isEnrolling || !name}
           >
@@ -176,8 +209,8 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     color: '#fff',
     textShadowColor: 'rgba(0, 0, 0, 0.75)',
-    textShadowOffset: {width: -1, height: 1},
-    textShadowRadius: 10
+    textShadowOffset: { width: -1, height: 1 },
+    textShadowRadius: 10,
   },
   instructionCard: {
     backgroundColor: 'rgba(0,0,0,0.6)',

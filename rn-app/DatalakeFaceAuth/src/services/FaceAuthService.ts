@@ -45,6 +45,7 @@ let _initialized = false;
  * Resolves the model directory inside the APK assets folder.
  */
 export async function initializeFaceAuth(): Promise<void> {
+  console.log('[FaceAuthService] initializeFaceAuth called');
   if (_initialized) return;
   if (!isNativeAvailable()) {
     console.warn('[FaceAuthService] Native module unavailable — running in mock mode');
@@ -52,6 +53,7 @@ export async function initializeFaceAuth(): Promise<void> {
     return;
   }
   try {
+    console.log('[FaceAuthService] Calling FaceAuthModule.initialize...');
     // On Android, TFLite models are bundled under assets/models/
     // The native module reads them from the app's files directory.
     // In production, copy assets to filesDir on first launch.
@@ -81,7 +83,9 @@ export async function authenticatePhoto(photoPath: string): Promise<AuthResult> 
   if (!isNativeAvailable()) {
     return mockAuthenticate();
   }
-  return FaceAuthModule.authenticateFromPath(photoPath);
+  const result = await FaceAuthModule.authenticateFromPath(photoPath);
+
+  return result;
 }
 
 // ── Enrollment ─────────────────────────────────────────────────────────────────
@@ -141,6 +145,20 @@ export async function getLastSyncTime(): Promise<string> {
   return new Date(Date.now() - 15 * 60 * 1000).toISOString();
 }
 
+export async function clearGallery(): Promise<void> {
+  if (!isNativeAvailable()) return;
+  await FaceAuthModule.clearGallery();
+}
+
+/**
+ * Returns the number of enrolled faces in the gallery.
+ * If 0, verification will never match — user must enroll first.
+ */
+export async function getEnrolledCount(): Promise<number> {
+  if (!isNativeAvailable()) return 0;
+  return FaceAuthModule.getEnrolledCount();
+}
+
 // ── Mocks (fallback when native module unavailable) ────────────────────────────
 
 let _mockCallCount = 0;
@@ -185,6 +203,8 @@ const FaceAuthService = {
   getAttendanceLog,
   getPendingRecordsCount,
   getLastSyncTime,
+  clearGallery,
+  getEnrolledCount,
 };
 
 export default FaceAuthService;

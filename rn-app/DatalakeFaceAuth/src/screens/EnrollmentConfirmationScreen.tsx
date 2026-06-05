@@ -1,7 +1,6 @@
 import React from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
-import Icon from 'react-native-vector-icons/Feather'; // Assuming we can use a checkmark icon or just text if not available
 
 export const EnrollmentConfirmationScreen = () => {
   const navigation = useNavigation<any>();

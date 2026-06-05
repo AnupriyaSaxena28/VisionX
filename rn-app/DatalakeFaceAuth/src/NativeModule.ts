@@ -95,6 +95,17 @@ export interface FaceAuthModuleInterface {
    * @returns A LivenessState snapshot.
    */
   getLivenessChallengeState(): Promise<LivenessState>;
+
+  /**
+   * Clear all enrolled faces and attendance logs from the local database.
+   */
+  clearGallery(): Promise<void>;
+
+  /**
+   * Returns the number of enrolled faces in the gallery.
+   * Useful for diagnostics — if 0, verification will never match.
+   */
+  getEnrolledCount(): Promise<number>;
 }
 
 // ---------------------------------------------------------------------------
@@ -113,5 +124,15 @@ export interface FaceAuthModuleInterface {
  */
 const FaceAuthModule =
   NativeModules.FaceAuthModule as FaceAuthModuleInterface;
+
+if (FaceAuthModule) {
+  const keys = [];
+  for (const key in FaceAuthModule) {
+    keys.push(key);
+  }
+  console.log('[NativeModule] FaceAuthModule keys (all):', keys);
+} else {
+  console.warn('[NativeModule] FaceAuthModule is null!');
+}
 
 export default FaceAuthModule;

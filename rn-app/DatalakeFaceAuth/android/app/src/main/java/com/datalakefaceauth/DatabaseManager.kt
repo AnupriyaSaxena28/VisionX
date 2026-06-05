@@ -8,6 +8,7 @@ import net.sqlcipher.database.SQLiteOpenHelper
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.UUID
+import kotlin.math.sqrt
 
 /**
  * Encrypted SQLite database manager (SQLCipher AES-256).
@@ -31,7 +32,7 @@ object DatabaseManager {
      * This matches M1's SCHEMA.md. Do NOT change without updating
      * FaceEmbedder and the Python enroll.py pipeline simultaneously.
      */
-    const val EMBEDDING_DIM         = 512
+    const val EMBEDDING_DIM         = 192
 
     @Volatile private var dbHelper: DatabaseHelper? = null
     @Volatile private var database: SQLiteDatabase?  = null
@@ -64,6 +65,17 @@ object DatabaseManager {
         require(embedding.size == EMBEDDING_DIM) {
             "Embedding must be $EMBEDDING_DIM floats, got ${embedding.size}"
         }
+
+        // Diagnostic: check if the embedding is a zero-vector (model not loaded)
+        val norm = sqrt(embedding.sumOf { (it * it).toDouble() }).toFloat()
+        if (norm < 1e-6f) {
+            Log.e(TAG, "⚠️ ENROLLING ZERO-VECTOR embedding for name=$name! " +
+                "This means the FaceEmbedder model is NOT loaded. " +
+                "Verification will NEVER match this enrollment.")
+        } else {
+            Log.i(TAG, "Enrollment embedding norm=$norm (healthy — non-zero)")
+        }
+
         val id        = UUID.randomUUID().toString()
         val blob      = floatToBytes(embedding)
         val timestamp = System.currentTimeMillis() / 1000L
@@ -72,7 +84,7 @@ object DatabaseManager {
             "INSERT INTO enrolled_faces (id, name, embedding, enrolled_at, synced) VALUES (?,?,?,?,0)",
             arrayOf(id, name, blob, timestamp)
         )
-        Log.d(TAG, "Enrolled: name=$name id=$id")
+        Log.d(TAG, "Enrolled: name=$name id=$id norm=$norm")
         return id
     }
 
@@ -93,6 +105,21 @@ object DatabaseManager {
         requireInitialized()
         database!!.rawQuery("SELECT name FROM enrolled_faces WHERE id=?", arrayOf(id)).use { c ->
             return if (c.moveToFirst()) c.getString(0) else null
+        }
+    }
+
+    fun clearGallery() {
+        requireInitialized()
+        database!!.execSQL("DELETE FROM enrolled_faces")
+        database!!.execSQL("DELETE FROM attendance_log")
+        Log.i(TAG, "Gallery and attendance logs cleared")
+    }
+
+    /** Returns the number of enrolled faces in the gallery. */
+    fun getEnrolledCount(): Int {
+        requireInitialized()
+        database!!.rawQuery("SELECT COUNT(*) FROM enrolled_faces", null).use { c ->
+            return if (c.moveToFirst()) c.getInt(0) else 0
         }
     }
 
@@ -190,6 +217,8 @@ object DatabaseManager {
             return if (c.moveToFirst()) c.getInt(0) else 0
         }
     }
+
+
 
     fun getLastSyncTimestamp(): Long {
         requireInitialized()

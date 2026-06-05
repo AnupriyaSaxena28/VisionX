@@ -1,7 +1,7 @@
 import React from 'react';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { TouchableOpacity, Text, StyleSheet } from 'react-native';
+import { TouchableOpacity, Text, StyleSheet, View } from 'react-native';
 
 // Screens
 import CameraScreen from '../screens/CameraScreen';
@@ -17,7 +17,7 @@ export type RootStackParamList = {
   Camera: undefined;
   Enrollment: undefined;
   EnrollmentConfirmation: { name: string; timestamp: string };
-  Result: { success: boolean; name?: string; timestamp?: string; reason?: string };
+  Result: { success: boolean; name?: string; timestamp?: string; score?: number; reason?: string };
   History: undefined;
 };
 
@@ -27,7 +27,7 @@ export const AppNavigator = () => {
   return (
     <NavigationContainer>
       <Stack.Navigator
-        screenOptions={({ navigation }) => ({
+        screenOptions={{
           headerStyle: {
             backgroundColor: '#121212',
           },
@@ -35,8 +35,7 @@ export const AppNavigator = () => {
           headerTitleStyle: {
             fontWeight: 'bold',
           },
-          headerRight: () => <SyncBadge />,
-        })}
+        }}
       >
         <Stack.Screen 
           name="Camera" 
@@ -50,6 +49,17 @@ export const AppNavigator = () => {
               >
                 <Text style={styles.navButtonText}>History</Text>
               </TouchableOpacity>
+            ),
+            headerRight: () => (
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <TouchableOpacity 
+                  style={styles.navButton} 
+                  onPress={() => navigation.navigate('Enrollment')}
+                >
+                  <Text style={[styles.navButtonText, { color: '#4CAF50' }]}>+ Enroll</Text>
+                </TouchableOpacity>
+                <SyncBadge />
+              </View>
             ),
           })}
         />
@@ -80,7 +90,7 @@ export const AppNavigator = () => {
 
 const styles = StyleSheet.create({
   navButton: {
-    marginRight: 15,
+    marginRight: 10,
   },
   navButtonText: {
     color: '#2196f3',

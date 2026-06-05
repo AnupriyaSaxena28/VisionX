@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { View, Text, StyleSheet, FlatList, ActivityIndicator, RefreshControl } from 'react-native';
-import FaceAuthService, { AttendanceLog } from '../services/FaceAuthService';
+import { View, Text, StyleSheet, FlatList, ActivityIndicator, RefreshControl, TouchableOpacity, Alert } from 'react-native';
+import FaceAuthService, { AttendanceLog, clearGallery } from '../services/FaceAuthService';
 
 export const HistoryScreen = () => {
   const [logs, setLogs] = useState<AttendanceLog[]>([]);
@@ -32,6 +32,33 @@ export const HistoryScreen = () => {
     fetchData();
   };
 
+  const handleClearGallery = () => {
+    Alert.alert(
+      'Clear Gallery',
+      'Are you sure you want to delete all enrolled faces and attendance logs? This cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { 
+          text: 'Clear All', 
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              setLoading(true);
+              await clearGallery();
+              await fetchData();
+              Alert.alert('Success', 'Gallery cleared successfully.');
+            } catch (err) {
+              console.error('Failed to clear gallery:', err);
+              Alert.alert('Error', 'Failed to clear gallery.');
+            } finally {
+              setLoading(false);
+            }
+          }
+        },
+      ]
+    );
+  };
+
   const renderItem = ({ item }: { item: AttendanceLog }) => (
     <View style={styles.logCard}>
       <View style={styles.logHeader}>
@@ -51,7 +78,12 @@ export const HistoryScreen = () => {
   return (
     <View style={styles.container}>
       <View style={styles.header}>
-        <Text style={styles.title}>Attendance History</Text>
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+          <Text style={[styles.title, { marginBottom: 0 }]}>Attendance History</Text>
+          <TouchableOpacity onPress={handleClearGallery}>
+            <Text style={{ color: '#f44336', fontWeight: 'bold' }}>Clear All</Text>
+          </TouchableOpacity>
+        </View>
         <Text style={styles.syncStatus}>Last Synced: {lastSynced !== 'Never' ? new Date(lastSynced).toLocaleString() : 'Never'}</Text>
       </View>
 

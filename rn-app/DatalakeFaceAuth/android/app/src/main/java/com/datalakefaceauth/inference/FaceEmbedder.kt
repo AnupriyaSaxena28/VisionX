@@ -32,8 +32,8 @@ class FaceEmbedder(modelDir: String) {
     companion object {
         private const val TAG            = "FaceEmbedder"
         private const val MODEL_FILE     = "mobilefacenet.tflite"
-        private const val INPUT_SIZE     = 96
-        private const val EMBEDDING_DIM  = 512
+        private const val INPUT_SIZE     = 112
+        private const val EMBEDDING_DIM  = 192
     }
 
     private val interpreter: Interpreter?
@@ -47,27 +47,29 @@ class FaceEmbedder(modelDir: String) {
                     setUseXNNPACK(true)
                 }
                 Interpreter(modelFile, opts).also {
-                    Log.d(TAG, "MobileFaceNet model loaded from $modelFile")
+                    val inputShape = it.getInputTensor(0).shape().joinToString(", ")
+                    val outputShape = it.getOutputTensor(0).shape().joinToString(", ")
+                    Log.i(TAG, "MobileFaceNet model loaded. Input: [$inputShape], Output: [$outputShape]")
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "Failed to load MobileFaceNet model", e)
+                Log.e(TAG, "⚠️ CRITICAL: Failed to load MobileFaceNet model", e)
                 null
             }
         } else {
-            Log.w(TAG, "mobilefacenet.tflite not found at $modelDir — embeddings will be zero-vectors")
+            Log.e(TAG, "⚠️ CRITICAL: mobilefacenet.tflite NOT FOUND at $modelDir")
             null
         }
     }
 
     /**
-     * Extracts a 512-dimensional L2-normalised embedding from [faceBitmap].
+     * Extracts a 192-dimensional L2-normalised embedding from [faceBitmap].
      *
-     * @param faceBitmap Aligned face crop (any size; will be resized to 96×96).
-     * @return L2-normalised float32 array of length 512.
+     * @param faceBitmap Aligned face crop (any size; will be resized to 112×112).
+     * @return L2-normalised float32 array of length 192.
      */
     fun extractEmbedding(faceBitmap: Bitmap): FloatArray {
         if (interpreter == null) {
-            Log.w(TAG, "Model not loaded — returning zero embedding")
+            Log.e(TAG, "⚠️ Model not loaded — returning ZERO embedding.")
             return FloatArray(EMBEDDING_DIM)
         }
 
@@ -77,25 +79,34 @@ class FaceEmbedder(modelDir: String) {
             .allocateDirect(1 * INPUT_SIZE * INPUT_SIZE * 3 * Float.SIZE_BYTES)
             .apply { order(ByteOrder.nativeOrder()) }
 
+        // InsightFace standard: NHWC format confirmed by model metadata [1, 112, 112, 3]
         for (y in 0 until INPUT_SIZE) {
             for (x in 0 until INPUT_SIZE) {
                 val px = scaled.getPixel(x, y)
-                inputBuf.putFloat(((px shr 16) and 0xFF) / 255f)  // R
-                inputBuf.putFloat(((px shr 8) and 0xFF) / 255f)   // G
-                inputBuf.putFloat((px and 0xFF) / 255f)            // B
+                inputBuf.putFloat((((px shr 16) and 0xFF) - 127.5f) / 128f)  // R
+                inputBuf.putFloat((((px shr 8) and 0xFF) - 127.5f) / 128f)   // G
+                inputBuf.putFloat(((px and 0xFF) - 127.5f) / 128f)            // B
             }
         }
         inputBuf.rewind()
 
-        val output = Array(1) { FloatArray(EMBEDDING_DIM) }
+        val output = mutableMapOf<Int, Any>()
+        val embeddingArray = Array(1) { FloatArray(EMBEDDING_DIM) }
+        output[0] = embeddingArray
+
         try {
-            interpreter.run(inputBuf, output)
+            interpreter.runForMultipleInputsOutputs(arrayOf(inputBuf), output)
+            val firstFew = embeddingArray[0].take(5).joinToString(", ")
+            Log.d(TAG, "Embedding generated (first 5): $firstFew")
         } catch (e: Exception) {
-            Log.e(TAG, "Embedding extraction failed", e)
+            Log.e(TAG, "Embedding extraction failed: ${e.message}", e)
             return FloatArray(EMBEDDING_DIM)
         }
 
-        return l2Normalize(output[0])
+        val normalized = l2Normalize(embeddingArray[0])
+        val norm = sqrt(normalized.sumOf { (it * it).toDouble() }).toFloat()
+        Log.d(TAG, "Embedding extracted: dim=${normalized.size}, L2 norm=$norm")
+        return normalized
     }
 
     // ─────────────────────────────────────────────────────────────

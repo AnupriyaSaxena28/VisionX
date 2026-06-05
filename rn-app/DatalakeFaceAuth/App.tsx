@@ -1,17 +1,17 @@
 import React, { useEffect } from 'react';
-import { StatusBar, useColorScheme } from 'react-native';
+import { StatusBar, useColorScheme, LogBox } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import AppNavigator from './src/navigation/AppNavigator';
 import { initializeFaceAuth } from './src/services/FaceAuthService';
 
+// Ignore specific warnings if necessary
+LogBox.ignoreLogs(['Worklets']);
+
 function App() {
   const isDarkMode = useColorScheme() === 'dark';
 
-  // ── M3 integration: boot the native face-auth module ──────────────────────
-  // initialize() loads BlazeFace + MobileFaceNet + FaceMesh from the models/
-  // directory and opens the SQLCipher database. Must complete before any
-  // authentication or enrollment call is made.
   useEffect(() => {
+    // M3 integration: boot the native face-auth module
     initializeFaceAuth().catch(err =>
       console.error('[App] FaceAuth init error:', err)
     );
